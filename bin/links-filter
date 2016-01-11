@@ -1,0 +1,4 @@
+#!/bin/bash
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/links-filter-stages"
+cat | "$DIR/inject-deps" | "$DIR/populate-links" | "$DIR/resolve-links" | "$DIR/fill-properties"

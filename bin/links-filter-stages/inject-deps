@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+
+manifest = YAML.load($stdin)
+
+unless manifest['releases'].map{|v|v['name']}.include? 'consul-bosh-links'
+  manifest['releases'] << {
+    'name' => 'consul-bosh-links',
+    'version' => ENV['BOSH_LINKS_CONSUL_VERSION'] || 'latest'
+  }
+end
+
+unless manifest['releases'].map{|v|v['name']}.include? 'consul'
+  manifest['releases'] << {
+    'name' => 'consul',
+    'version' => ENV['CONSUL_VERSION'] || 'latest'
+  }
+end
+
+manifest['jobs'].each do | job |
+  job['templates'] << {
+    'release' => 'consul-bosh-links',
+    'name' => 'consul-bosh-links',
+  }
+
+  unless job['templates'].map{|v|v['release']}.include? 'consul'
+    job['templates'] << {
+      'release' => 'consul',
+      'name' => 'consul',
+    }
+  end
+end
+
+manifest['properties'] ||= {}
+manifest['properties']['consul'] ||= {}
+manifest['properties']['consul']['server'] ||= false
+manifest['properties']['consul']['leave_on_terminate'] ||= true
+manifest['properties']['consul']['agent_config'] ||= {}
+manifest['properties']['consul']['agent_config']['dns_config'] ||= {}
+manifest['properties']['consul']['agent_config']['dns_config']['allow_stale'] ||= true
+manifest['properties']['consul']['agent_config']['dns_config']['max_stale'] ||= '15s'
+manifest['properties']['consul']['agent_config']['dns_config']['node_ttl'] ||= '60s'
+manifest['properties']['consul']['agent_config']['dns_config']['service_ttl'] ||= {}
+manifest['properties']['consul']['agent_config']['dns_config']['service_ttl']['*'] ||= '15s'
+manifest['properties']['consul']['agent_config']['dns_config']['only_passing'] ||= true
+manifest['properties']['consul']['agent_config']['bootstrap_expect'] = nil unless manifest['properties']['consul']['server']
+
+YAML.dump(manifest, $stdout)

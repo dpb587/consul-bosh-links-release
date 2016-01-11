@@ -1,0 +1,59 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+
+manifest = YAML.load($stdin)
+
+manifest['jobs'].each do | job |
+  job['templates'].each do | template |
+    link_properties = {}
+
+    if template.has_key?('provides')
+      link_config = {}
+
+      template['provides'].each do | link_name, link |
+        link_config[link_name] = {
+          'name' => link['name'],
+          'type' => link['type'],
+          'network' => link['network'],
+          'deployment' => manifest['name'],
+          'dns' => "#{manifest['name']}--#{link['name']}.service.#{((manifest['properties']||{})['consul']||{})['domain']||'consul'}.",
+          'service' => "#{manifest['name']}--#{link['name']}",
+          'properties' => ((manifest['properties'] || {})['_links'] || {})[link['name']] || {},
+          'shared' => link['shared'],
+        }
+      end
+    
+      if 0 < link_config.keys.length
+        job['properties'] ||= {}
+        job['properties']['_links'] ||= {}
+        job['properties']['_links'][template['name']] ||= {}
+        job['properties']['_links'][template['name']]['provides'] = link_config
+      end
+    end
+    
+    if template.has_key?('consumes')
+      link_config = {}
+
+      template['consumes'].each do | link_name, link |
+        link_config[link_name] = {
+          'name' => link['name'],
+          'type' => link['type'],
+          'deployment' => link['deployment'],
+          'dns' => "#{link['deployment']}--#{link['name']}.service.#{((manifest['properties']||{})['consul']||{})['domain']||'consul'}.",
+          'service' => "#{link['deployment']}--#{link['name']}",
+          'properties' => link['properties'],
+        }
+      end
+    
+      if 0 < link_config.keys.length
+        job['properties'] ||= {}
+        job['properties']['_links'] ||= {}
+        job['properties']['_links'][template['name']] ||= {}
+        job['properties']['_links'][template['name']]['consumes'] = link_config
+      end
+    end
+  end
+end
+
+YAML.dump(manifest, $stdout)

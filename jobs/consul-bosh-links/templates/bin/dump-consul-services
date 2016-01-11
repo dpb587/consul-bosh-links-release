@@ -1,0 +1,59 @@
+#!/bin/bash
+
+mkdir -p /var/vcap/jobs/consul-bosh-links/links
+
+<%
+p('bosh_links_consul.override_checks').each do | v |
+%>
+cat > /var/vcap/jobs/consul-bosh-links/links/<%= v['template'] %>.<%= v['name'] %>.consul.json <<EOF
+<%= JSON.dump(v['check']) %>
+EOF
+<%
+end
+%>
+
+echo '{'
+echo '  "services" : ['
+
+<%
+first = true
+
+p('_links').each do | template_name, link_methods |
+  next unless link_methods.has_key?('provides')
+  
+  link_methods['provides'].each do | link_name, link |
+    unless first
+%>
+      echo ','
+<%
+    end
+%>
+    echo '{'
+    echo '  "name": "<%= spec.deployment %>--<%= link['name'] %>"'
+    echo ', "tags": ["<%= link['type'] %>"]'
+    echo ', "address": "<%= spec.networks[link['network']].ip %>"'
+    
+    <% if link['properties'].has_key?('port') %>
+      echo ', "port": <%= link['properties']['port'] %>'
+    <% end %>
+
+    CHECK_FILE="/var/vcap/jobs/consul-bosh-links/links/<%= template_name %>.<%= link_name %>.consul.json"
+    
+    if [ ! -e "$CHECK_FILE" ] ; then
+      CHECK_FILE="/var/vcap/jobs/<%= template_name %>/links/<%= link_name %>.consul.json"
+    fi
+
+    if [ -e "$CHECK_FILE" ] ; then
+      echo ', "checks":'
+      cat "$CHECK_FILE"
+    fi
+    
+    echo '}'
+<%
+    first = false
+  end
+end
+%>
+
+echo '  ]'
+echo '}'

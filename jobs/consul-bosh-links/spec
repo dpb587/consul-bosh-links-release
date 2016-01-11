@@ -1,0 +1,9 @@
+---
+name: "consul-bosh-links"
+packages: []
+templates:
+  bin/dump-consul-services: bin/dump-consul-services
+  bin/pre-start: bin/pre-start
+properties:
+  _links: { default: {} }
+  bosh_links_consul.override_checks: { default: {} }

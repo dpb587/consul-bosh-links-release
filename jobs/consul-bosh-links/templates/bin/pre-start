@@ -1,0 +1,13 @@
+#!/bin/bash
+
+set -e
+
+JOB_DIR=/var/vcap/jobs/consul-bosh-links
+
+mkdir -p $JOB_DIR/consul
+$JOB_DIR/bin/dump-consul-services > $JOB_DIR/consul/services.json
+
+DEFAULT_NAME="<%= spec.deployment %>-<%= name %>-<%= index %>"
+PREFERRED_NAME="<%= spec.deployment %>--<%= name %>--<%= index %>"
+
+sed -ri "s/\"node_name\":\s*\"$DEFAULT_NAME\"/\"node_name\":\"$PREFERRED_NAME\"/" /var/vcap/jobs/consul/consul/agent.json

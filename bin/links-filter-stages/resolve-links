@@ -1,0 +1,79 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'json'
+
+manifest = YAML.load($stdin)
+
+def resolve_consumes(consume_from, local_manifest)
+  if consume_from.include?('.')
+    consume_split = consume_from.split('.')
+    manifest = YAML.load(`bosh download manifest "#{consume_split[0]}" 2>/dev/null`)
+    consume_from = consume_split[1]
+  else
+    manifest = local_manifest
+  end
+
+  resolved = nil
+  
+  manifest['jobs'].each do | job |
+    job['templates'].each do | template |
+      next unless template.has_key?('provides')
+    
+      template['provides'].each do | link_name, link |
+        next unless consume_from == link['name']
+        link['_deps'] = (link['_deps'] || 0) + 1
+
+        resolved = {
+          'name' => consume_from,
+          'deployment' => manifest['name'],
+          'properties' => ((manifest['properties'] || {})['_links'] || {})[consume_from] || {},
+        }
+      end
+    end
+  end
+  
+  resolved
+end
+
+manifest['jobs'].each do | job |
+  link_names = {}
+
+  job['templates'].each do | template |
+    next unless template.has_key?('consumes')
+
+    template['consumes'].each do | link_name, link |
+      if link.nil?
+        template['consumes'].delete(link_name)
+        
+        next
+      end
+      
+      resolved = resolve_consumes(link['name'], manifest)
+      
+      if resolved.nil?
+        raise "Failed to resolve link '#{link_name}' for template '#{template['name']}' in job '#{job['name']}' using '#{link['name']}'"
+      end
+      
+      link['name'] = resolved['name']
+      link['deployment'] = resolved['deployment']
+      link['properties'] = resolved['properties'].merge(link['properties'] || {})
+    end
+  end
+end
+
+manifest['jobs'].each do | job |
+  job['templates'].each do | template |
+    next unless template.has_key?('provides')
+    
+    template['provides'].each do | provide_name, provide_link |
+      deps = provide_link.delete('_deps') || 0
+      next if true == provide_link['shared']
+      next if 0 < deps
+      
+      template['provides'].delete(provide_name)
+    end
+  end
+end
+
+YAML.dump(manifest, $stdout)

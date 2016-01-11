@@ -1,0 +1,139 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+
+manifest = YAML.load($stdin)
+
+def lookup_release_version(manifest, release_name)
+  manifest['releases'].each do | release |
+    next unless release_name == release['name']
+
+    return release['version']
+  end
+  
+  raise "Failed to find release in deployment manifest"
+end
+
+def lookup_links(release, version, job)
+  cached = {}
+  release_map = YAML.load(File.read("#{ENV['HOME']}/bosh-release-source.yml"))
+  
+  lambda {
+    unless cached.has_key?(release)
+      cached[release] = {}
+    end
+  
+    unless cached[release].has_key?(job)
+      cached[release][job] = {
+        'consumes' => {},
+        'provides' => {},
+      }
+
+      if release_map.has_key?(release)
+        if 'latest' == version
+          commitish = release_map[release]['branch']
+        else
+          commitish = "v#{version}"
+        end
+        
+        spec = YAML.load `( cd #{release_map[release]['path']} ; git show #{commitish}:jobs/#{job}/spec )`
+        
+        if spec.has_key?('provides_v2')
+          spec['provides'] = spec.delete('provides_v2')
+        end
+        
+        if spec.has_key?('consumes_v2')
+          spec['consumes'] = spec.delete('consumes_v2')
+        end
+
+        unless spec.nil?
+          cached[release][job].keys.each do | link_method |
+            next unless spec.has_key?(link_method)
+        
+            spec[link_method] ||= []
+        
+            spec[link_method].each do | link |
+              cached[release][job][link_method][link['name']] = {
+                'name' => link['name'],
+                'type' => link['type'] || link['name'],
+              }
+            end
+          end
+        end
+      end
+    end
+  
+    cached[release][job]
+  }.call
+end
+
+manifest['jobs'].each do | job |
+  link_names = {}
+
+  default_network = job['networks'][0]['name']
+  job['networks'].map do | network |
+    next unless (network['default'] || []).include?('gateway')
+    
+    default_network = network['name']
+    true
+  end
+
+  job['templates'].each do | template |
+    spec_links = lookup_links(
+      template['release'],
+      lookup_release_version(manifest, template['release']),
+      template['name']
+    )
+    consumes = template['consumes'] || {}
+    provides = template['provides'] || {}
+
+    spec_links['consumes'].each do | link_name, link |
+      if consumes.has_key?(link_name)
+        if consumes[link_name].nil?
+          next
+        end
+        
+        if consumes[link_name].has_key?('from')
+          link['name'] = consumes[link_name]['from']
+        end
+        
+        if consumes[link_name].has_key?('properties')
+          link['properties'] = consumes[link_name]['properties']
+        end
+      end
+      
+      consumes[link_name] = link
+    end
+    
+    spec_links['provides'].each do | link_name, link |
+      if provides.has_key?(link_name)
+        if provides[link_name].has_key?('as')
+          link['name'] = provides[link_name]['as']
+        end
+        
+        if provides[link_name].has_key?('shared')
+          link['shared'] = provides[link_name]['shared']
+        end
+        
+        if provides[link_name].has_key?('network')
+          link['network'] = provides[link_name]['network']
+        end
+      end
+      
+      link['shared'] ||= false
+      link['network'] ||= default_network
+
+      provides[link_name] = link
+    end
+    
+    unless 0 == consumes.length
+      template['consumes'] = consumes
+    end
+    
+    unless 0 == provides.length
+      template['provides'] = provides
+    end
+  end
+end
+
+YAML.dump(manifest, $stdout)

@@ -1,0 +1,514 @@
+---
+compilation:
+  cloud_properties:
+    availability_zone: us-west-2b
+    instance_type: c3.large
+  network: z0_compilation
+  reuse_compilation_vms: true
+  workers: 1
+director_uuid: a7990177-d4a3-4b5d-b26b-36b7b716e9f8
+jobs:
+- cloque.revitalize:
+  - deployment: mysqlslave-legacy
+    director: prod-abraxas-aws-usw2
+    index: 0
+    job: mysql
+    method: snapshot_copy
+  - deployment: elasticsearch-publicweb
+    director: prod-abraxas-aws-usw2
+    index: 0
+    job: main-z0
+    method: snapshot_copy
+  - copy_method: merge
+    deployment: elasticsearch-publicweb
+    director: prod-abraxas-aws-usw2
+    index: 0
+    job: main-z1
+    method: snapshot_copy
+  - method: script
+    script: |
+      #/bin/bash
+
+      set -e
+      set -u
+      set -x
+
+      chown -R vcap:vcap /var/vcap/packages/legacy/root
+
+      rm -fr /var/vcap/store/consul/*
+
+      /var/vcap/bosh/bin/monit start consul
+
+      sleep 60
+
+      CONSUL=http://127.0.0.1:8500
+      /usr/bin/curl -X PUT -d 'false' $CONSUL/v1/kv/webapp-nginx/maintenance
+      /usr/bin/curl -X PUT -d 'webapp-nginx' $CONSUL/v1/kv/webapp-nginx/versions/default
+      /usr/bin/curl -X PUT -d 'default' $CONSUL/v1/kv/webapp-nginx/default_version
+      /usr/bin/curl -X PUT -d 'true' $CONSUL/v1/kv/wordpress-nginx/maintenance
+      /usr/bin/curl -X PUT -d 'blogsheri-wordpress-nginx' $CONSUL/v1/kv/wordpress-nginx/versions/default
+      /usr/bin/curl -X PUT -d 'default' $CONSUL/v1/kv/wordpress-nginx/default_version
+
+      sleep 5
+
+      /var/vcap/bosh/bin/monit stop consul
+
+
+      cat > /tmp/resetprivs.sql << EOF
+          UPDATE mysql.user SET Password = PASSWORD('password') WHERE User = 'root';
+          GRANT USAGE ON *.* TO def_app@'%' IDENTIFIED BY 'def_app';
+          GRANT ALL PRIVILEGES ON def_app.* TO def_app@'%';
+          GRANT USAGE ON *.* TO def_app@'%' IDENTIFIED BY 'def_app';
+          GRANT ALL PRIVILEGES ON app_legacy.* TO def_app@'%';
+          GRANT ALL PRIVILEGES ON app_legacy_sess.* TO def_app@'%';
+          FLUSH PRIVILEGES;
+      EOF
+
+      echo 'init-file = /tmp/resetprivs.sql' >> /var/vcap/jobs/mysql/etc/mysqld.ini
+      /var/vcap/bosh/bin/monit start mysql
+
+      sleep 60
+
+      cat | /var/vcap/packages/mysql/bin/mysql -u root -ppassword --socket /var/vcap/sys/run/mysql/mysqld.sock << EOF
+          CREATE DATABASE IF NOT EXISTS app_legacy_sess CHARSET = utf8 COLLATE = utf8_general_ci;
+          CREATE TABLE IF NOT EXISTS app_legacy_sess.sess_table (
+              sess_id varchar(255) NOT NULL,
+              sess_data text NOT NULL,
+              sess_time int(11) NOT NULL,
+              PRIMARY KEY (sess_id)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+      EOF
+
+      sed -i'' 's/init-file = \/tmp\/resetprivs.sql//' /var/vcap/jobs/mysql/etc/mysqld.ini
+
+      cd /var/vcap/packages/legacy/root
+
+      sudo rm -fr /var/vcap/jobs/webapp/cache/* /var/vcap/jobs/worker/cache/*
+
+      export PATH="/var/vcap/packages/php/bin:/var/vcap/packages/mysql/bin:/var/vcap/packages/legacy/external/java/bin:$PATH"
+      console=/var/vcap/jobs/webapp/bin/console
+
+      chown -R vcap:vcap /var/vcap/packages/legacy
+
+      mkdir -p /var/vcap/sys/log/webapp
+      chown vcap:vcap /var/vcap/sys/log/webapp
+
+      sudo -E -u vcap $console cache:warmup
+      sudo -E -u vcap $console assetic:pre-install
+      sudo -E -u vcap $console assets:install web
+      sudo -E -u vcap $console assetic:dump
+      sudo -E -u vcap $console assetic:post-install
+
+      /var/vcap/bosh/bin/monit stop mysql
+
+      sleep 60
+  instances: 1
+  name: main
+  networks:
+  - name: z0_default
+    static_ips:
+    - 10.219.81.41
+  persistent_disk: 65536
+  properties:
+    legacy:
+      file:
+        google_api_default_key: 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
+    networks:
+      apps: z0_default
+    _links:
+      webapp:
+        provides:
+          webapp:
+            name: webapp
+            type: http
+            network: z0_default
+            deployment: legacy-develop
+            dns: legacy-develop--webapp.service.consul
+            service: legacy-develop--webapp
+            properties: &2
+              port: 8080
+            shared: false
+        consumes:
+          mysql:
+            name: mysql
+            type: db
+            deployment: legacy-develop
+            dns: legacy-develop--mysql.service.consul
+            service: legacy-develop--mysql
+            properties: &1
+              port: 3306
+              database: app_legacy
+              user: def_app
+              password: def_app
+          elasticsearch:
+            name: elasticsearch
+            type: elasticsearch
+            deployment: legacy-develop
+            dns: legacy-develop--elasticsearch.service.consul
+            service: legacy-develop--elasticsearch
+            properties: &3
+              port: 9200
+      worker:
+        consumes:
+          mysql:
+            name: mysql
+            type: db
+            deployment: legacy-develop
+            dns: legacy-develop--mysql.service.consul
+            service: legacy-develop--mysql
+            properties: *1
+      mysql:
+        provides:
+          mysql:
+            name: mysql
+            type: db
+            network: z0_default
+            deployment: legacy-develop
+            dns: legacy-develop--mysql.service.consul
+            service: legacy-develop--mysql
+            properties: *1
+            shared: false
+      frontend:
+        provides:
+          http:
+            name: http
+            type: http
+            network: z0_default
+            deployment: legacy-develop
+            dns: legacy-develop--http.service.consul
+            service: legacy-develop--http
+            properties: {}
+            shared: true
+          https:
+            name: https
+            type: https
+            network: z0_default
+            deployment: legacy-develop
+            dns: legacy-develop--https.service.consul
+            service: legacy-develop--https
+            properties: {}
+            shared: true
+        consumes:
+          webapp:
+            name: webapp
+            type: http
+            deployment: legacy-develop
+            dns: legacy-develop--webapp.service.consul
+            service: legacy-develop--webapp
+            properties: *2
+      elasticsearch:
+        provides:
+          elasticsearch:
+            name: elasticsearch
+            type: elasticsearch
+            network: z0_default
+            deployment: legacy-develop
+            dns: legacy-develop--elasticsearch.service.consul
+            service: legacy-develop--elasticsearch
+            properties: *3
+            shared: false
+  resource_pool: z0_default
+  templates:
+  - name: webapp
+    release: tle-legacy
+    consumes:
+      mysql:
+        name: mysql
+        type: db
+        deployment: legacy-develop
+        properties: *1
+      elasticsearch:
+        name: elasticsearch
+        type: elasticsearch
+        deployment: legacy-develop
+        properties: *3
+    provides:
+      webapp:
+        name: webapp
+        type: http
+        shared: false
+        network: z0_default
+  - name: worker
+    release: tle-legacy
+    consumes:
+      mysql:
+        name: mysql
+        type: db
+        deployment: legacy-develop
+        properties: *1
+  - name: mysql
+    release: tle-legacy
+    provides:
+      mysql:
+        name: mysql
+        type: db
+        shared: false
+        network: z0_default
+  - name: legacy-build
+    release: tle-legacy
+  - name: frontend
+    release: tle-legacy
+    provides:
+      http:
+        name: http
+        type: http
+        shared: true
+        network: z0_default
+      https:
+        name: https
+        type: https
+        shared: true
+        network: z0_default
+    consumes:
+      webapp:
+        name: webapp
+        type: http
+        deployment: legacy-develop
+        properties: *2
+  - name: elasticsearch
+    release: logsearch
+    provides:
+      elasticsearch:
+        name: elasticsearch
+        type: elasticsearch
+        shared: false
+        network: z0_default
+  - name: consul
+    release: consul
+  - name: spot-termination-notice
+    release: aws-utils
+  - release: consul-bosh-links
+    name: consul-bosh-links
+name: legacy-develop
+networks:
+- cloud_properties:
+    security_groups:
+    - dev-belasco-aws-usw2-core-TrustedPeerSecurityGroup-NO6JAO7NBPVV
+    subnet: subnet-6bdd090e
+  dns:
+  - 169.254.169.253
+  name: z0_compilation
+  type: dynamic
+- name: z0_default
+  subnets:
+  - cloud_properties:
+      security_groups:
+      - dev-belasco-aws-usw2-core-TrustedPeerSecurityGroup-NO6JAO7NBPVV
+      subnet: subnet-6bdd090e
+    gateway: 10.219.80.1
+    range: 10.219.80.0/20
+    static:
+    - 10.219.81.41
+  type: manual
+properties:
+  _links:
+    elasticsearch: *3
+    webapp: *2
+    mysql: *1
+  bosh_links_consul:
+    override_checks:
+    - template: elasticsearch
+      name: elasticsearch
+      checks:
+      - id: elasticsearch-elasticsearch-http
+        notes: http
+        http: http://127.0.0.1:9200/
+        interval: 15s
+        timeout: 3s
+  consul:
+    cluster:
+      join_hosts:
+      - 127.0.0.1
+      size: 1
+    service:
+      tags:
+      - dev
+  elasticsearch:
+    cluster_name: publicweb
+    config_options: |-
+      cluster.routing.allocation.cluster_concurrent_rebalance: 1
+      cluster.routing.allocation.node_concurrent_recoveries: 1
+      cluster.routing.allocation.node_initial_primaries_recoveries: 2
+      indices.recovery.concurrent_streams: 2
+      script.disable_dynamic: false
+      node.director: dev-belasco-aws-usw2
+    plugins:
+    - kopf: lmenezes/elasticsearch-kopf
+  frontend:
+    domains:
+    - legacy-develop.abytepool.com
+    - www.legacy-develop.abytepool.com
+    ssl_certificate: |
+      -----BEGIN CERTIFICATE-----
+      MIIGXzCCBUegAwIBAgIHBkO8515UqzANBgkqhkiG9w0BAQsFADCBjDELMAkGA1UE
+      BhMCSUwxFjAUBgNVBAoTDVN0YXJ0Q29tIEx0ZC4xKzApBgNVBAsTIlNlY3VyZSBE
+      aWdpdGFsIENlcnRpZmljYXRlIFNpZ25pbmcxODA2BgNVBAMTL1N0YXJ0Q29tIENs
+      YXNzIDEgUHJpbWFyeSBJbnRlcm1lZGlhdGUgU2VydmVyIENBMB4XDTE1MDkxMTAx
+      MTg1N1oXDTE2MDkxMTE2Mzg0NFowXzELMAkGA1UEBhMCVVMxJTAjBgNVBAMTHGxl
+      Z2FjeS1kZXZlbG9wLmFieXRlcG9vbC5jb20xKTAnBgkqhkiG9w0BCQEWGmhvc3Rt
+      YXN0ZXJAdGhlbG9vcHlld2UuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
+      CgKCAQEA17/EMQAncfBroGJckeHmiPZ56gIn8SJkvtf9cGaLLa+oRxJDjDIaNWz+
+      GzvDAc1l5KqK6FJBW5lcMBsMydziutyM2LZWqTQUJMwpebbicCa65dPUJ9SeRo8K
+      01nW1rLpq1qq+Uomw0xRjGUDAtPGkP4HjrdfMoDYA8m24dGcoEY1IAi8lrPc56mV
+      ayQrVHJmj4hv/Sse5U9Hn4miVL+zWaf6ECUgzBIwx3y6eUi6LrG8D3p1ZaPvIhGj
+      gjhnMSNBx7zrfqTNwtX5bxVlgVPGHubmx8zo1EA2WFQLjf8hCSr08R9vpaWKequo
+      tnFpiTyZedzZLEu5gPyfyuQi+DL2FQIDAQABo4IC8DCCAuwwCQYDVR0TBAIwADAL
+      BgNVHQ8EBAMCA6gwEwYDVR0lBAwwCgYIKwYBBQUHAwEwHQYDVR0OBBYEFBGuAH8c
+      JHOv3ZFW9Atw1vIDuIBBMB8GA1UdIwQYMBaAFOtCNNCYsKuf9BtrCPfMZC7vDixF
+      MDYGA1UdEQQvMC2CHGxlZ2FjeS1kZXZlbG9wLmFieXRlcG9vbC5jb22CDWFieXRl
+      cG9vbC5jb20wggFWBgNVHSAEggFNMIIBSTAIBgZngQwBAgEwggE7BgsrBgEEAYG1
+      NwECAzCCASowLgYIKwYBBQUHAgEWImh0dHA6Ly93d3cuc3RhcnRzc2wuY29tL3Bv
+      bGljeS5wZGYwgfcGCCsGAQUFBwICMIHqMCcWIFN0YXJ0Q29tIENlcnRpZmljYXRp
+      b24gQXV0aG9yaXR5MAMCAQEagb5UaGlzIGNlcnRpZmljYXRlIHdhcyBpc3N1ZWQg
+      YWNjb3JkaW5nIHRvIHRoZSBDbGFzcyAxIFZhbGlkYXRpb24gcmVxdWlyZW1lbnRz
+      IG9mIHRoZSBTdGFydENvbSBDQSBwb2xpY3ksIHJlbGlhbmNlIG9ubHkgZm9yIHRo
+      ZSBpbnRlbmRlZCBwdXJwb3NlIGluIGNvbXBsaWFuY2Ugb2YgdGhlIHJlbHlpbmcg
+      cGFydHkgb2JsaWdhdGlvbnMuMDUGA1UdHwQuMCwwKqAooCaGJGh0dHA6Ly9jcmwu
+      c3RhcnRzc2wuY29tL2NydDEtY3JsLmNybDCBjgYIKwYBBQUHAQEEgYEwfzA5Bggr
+      BgEFBQcwAYYtaHR0cDovL29jc3Auc3RhcnRzc2wuY29tL3N1Yi9jbGFzczEvc2Vy
+      dmVyL2NhMEIGCCsGAQUFBzAChjZodHRwOi8vYWlhLnN0YXJ0c3NsLmNvbS9jZXJ0
+      cy9zdWIuY2xhc3MxLnNlcnZlci5jYS5jcnQwIwYDVR0SBBwwGoYYaHR0cDovL3d3
+      dy5zdGFydHNzbC5jb20vMA0GCSqGSIb3DQEBCwUAA4IBAQBG8jCaNu1FMtrv12DZ
+      RzjXV1+x5qLhbTAKS1iLni1vhqnbVUBxGXj35c0I3Vp1X+qFfkTn7pB9Sp2rzpno
+      WHyujvdsMkRq1BIJrDceBex72JHbN48FmGT4z77GlbdpvO6FW+pk5UqEJlOdqRMF
+      p8ET2GlcpQ8UCH4N9EEOUAWV56NC9bG0lRgVufqVfajJo0/ln0ZGCq83vAqxbx4y
+      xGlGfDx5/6JROd+DkkmUwfncf2I4Ki59dDNaGmB6pIuq8t+GivukI8XeJFhSw4s0
+      FDYIPNctGRGUWcEi05PEkB80sDu5ekAYUcLQw6xiGwL96k5opfPNjRy0awh3D2pI
+      ik9j
+      -----END CERTIFICATE-----
+      -----BEGIN CERTIFICATE-----
+      MIIF2TCCA8GgAwIBAgIHFxU9nqs/vzANBgkqhkiG9w0BAQsFADB9MQswCQYDVQQG
+      EwJJTDEWMBQGA1UEChMNU3RhcnRDb20gTHRkLjErMCkGA1UECxMiU2VjdXJlIERp
+      Z2l0YWwgQ2VydGlmaWNhdGUgU2lnbmluZzEpMCcGA1UEAxMgU3RhcnRDb20gQ2Vy
+      dGlmaWNhdGlvbiBBdXRob3JpdHkwHhcNMDcxMDE0MjA1NDE3WhcNMjIxMDE0MjA1
+      NDE3WjCBjDELMAkGA1UEBhMCSUwxFjAUBgNVBAoTDVN0YXJ0Q29tIEx0ZC4xKzAp
+      BgNVBAsTIlNlY3VyZSBEaWdpdGFsIENlcnRpZmljYXRlIFNpZ25pbmcxODA2BgNV
+      BAMTL1N0YXJ0Q29tIENsYXNzIDEgUHJpbWFyeSBJbnRlcm1lZGlhdGUgU2VydmVy
+      IENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtonGrO8JUngHrJJj
+      0PREGBiEgFYfka7hh/oyULTTRwbw5gdfcA4Q9x3AzhA2NIVaD5Ksg8asWFI/ujjo
+      /OenJOJApgh2wJJuniptTT9uYSAK21ne0n1jsz5G/vohURjXzTCm7QduO3CHtPn6
+      6+6CPAVvkvek3AowHpNz/gfK11+AnSJYUq4G2ouHI2mw5CrY6oPSvfNx23BaKA+v
+      WjhwRRI/ME3NO68X5Q/LoKldSKqxYVDLNM08XMML6BDAjJvwAwNi/rJsPnIO7hxD
+      KslIDlc5xDEhyBDBLIf+VJVSH1I8MRKbf+fAoKVZ1eKPPvDVqOHXcDGpxLPPr21T
+      Lwb0pwIDAQABo4IBTDCCAUgwEgYDVR0TAQH/BAgwBgEB/wIBADAOBgNVHQ8BAf8E
+      BAMCAQYwHQYDVR0OBBYEFOtCNNCYsKuf9BtrCPfMZC7vDixFMB8GA1UdIwQYMBaA
+      FE4L7xqkQFulF2mHMMo0aEPQQa7yMGkGCCsGAQUFBwEBBF0wWzAnBggrBgEFBQcw
+      AYYbaHR0cDovL29jc3Auc3RhcnRzc2wuY29tL2NhMDAGCCsGAQUFBzAChiRodHRw
+      Oi8vYWlhLnN0YXJ0c3NsLmNvbS9jZXJ0cy9jYS5jcnQwMgYDVR0fBCswKTAnoCWg
+      I4YhaHR0cDovL2NybC5zdGFydHNzbC5jb20vc2ZzY2EuY3JsMEMGA1UdIAQ8MDow
+      OAYEVR0gADAwMC4GCCsGAQUFBwIBFiJodHRwOi8vd3d3LnN0YXJ0c3NsLmNvbS9w
+      b2xpY3kucGRmMA0GCSqGSIb3DQEBCwUAA4ICAQCBnsOw7dxamNbdJb/ydkh4Qb6E
+      qgEU+G9hCCIGXwhWRZMYczNJMrpVvyLq5mNOmrFPC7bJrqYV+vEOYHNXrzthLyOG
+      FFOVQe2cxbmQecFOvbkWVlYAIaTG42sHKVi+RFsG2jRNZcFhHnsFnLPMyE6148lZ
+      wVdZGsxZvpeHReNUpW0jh7uq90sShFzHs4f7wJ5XmiHOL7fZbnFV6uE/OoFnBWif
+      CRnd9+RE3uCospESPCRPdbG+Q4GQ+MBS1moXDTRB6DcNoHvqC6eU3r8/Fn/DeA9w
+      9JHPXUfrAhZYKyOQUIqcfE5bvssaY+oODVxji6BMk8VSVHsJ4FSC1/7Pkt/UPoQp
+      FVh38wIJnvEUeNVmVl3HHFYTd50irdKYPBC63qi2V/YYI6bJKmbrjfP9Vhyt9uNr
+      y3Kh4W22ktDuCCvWC7n/gqerdq+VlTRfNt7D/mB0irnaKjEVNCXBXm9V/978J+Ez
+      8aplGZccQ9jnc9kiPtUp5dj45E3V8vKqzp9srSSI5Xapdg+ZcPY+6HNuVB+MadRp
+      ZW2One/Qnzg9B4GnVX7MOETImdoP4kXpostFuxoY/5LxCU1LJAIENV4txvT50lX2
+      GBXCkxllRLWOgdyll11ift/4IO1aCOGDijGIfh498YisM1LGxytmGcxvbJERVri+
+      gGpWAZ5J6dvtf0s+bA==
+      -----END CERTIFICATE-----
+    ssl_key: |
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEowIBAAKCAQEA17/EMQAncfBroGJckeHmiPZ56gIn8SJkvtf9cGaLLa+oRxJD
+      jDIaNWz+GzvDAc1l5KqK6FJBW5lcMBsMydziutyM2LZWqTQUJMwpebbicCa65dPU
+      J9SeRo8K01nW1rLpq1qq+Uomw0xRjGUDAtPGkP4HjrdfMoDYA8m24dGcoEY1IAi8
+      lrPc56mVayQrVHJmj4hv/Sse5U9Hn4miVL+zWaf6ECUgzBIwx3y6eUi6LrG8D3p1
+      ZaPvIhGjgjhnMSNBx7zrfqTNwtX5bxVlgVPGHubmx8zo1EA2WFQLjf8hCSr08R9v
+      paWKequotnFpiTyZedzZLEu5gPyfyuQi+DL2FQIDAQABAoIBAAImUgEe/EWhXKEr
+      ebqmYpKoygwv21AGxLQ2GLte+jIJVwbmQrAJ68LuhBWnYckJz+MYY+vureIIxCdi
+      jZ0RS10LR4f9QR3MfArl0d/5l4YAjMovcyS2dKFFWZlDguV+wN9JNvzm5T3667EX
+      bJFBpO/a6B5e617oc76N6vmTChl6tOsm0BsHOUBby+RXUABjQvi5/DEsaw06QipJ
+      3txd9nWsJ+zw1M5MEFAPgP6OFuQePl7aoIsHveE6MXoseM4Ii0jnums2rEiLC6M/
+      z3OiQYLlwMjSDsg38C+CoTAE7NZlNdQrbvwOJvsIsr9NaOQkEqMiavAJjulAGFCz
+      XUd22T0CgYEA80CcnYdBpD4nwRCnltZY02+t99phhslsFwBpDzFzAYOOnVIFklC3
+      HMr/N82bp92Dn1XRGFo0xsdbIUzkA3kfwlgSJObo6cpOcM7nmPDiKkngKfWf6Bch
+      jEMlXibG9ED4izYD+lc8pjLgoaklUc7wv9MXbHXW1w50e8af+l0G5z8CgYEA4w4u
+      FCVFa2YO3VD/YtJI3srMY0u2S8z3a/8piHWyTNV3N3YVdoRsewsRSWj/OXB9gQxh
+      22oyCQDoacIXPX4/Wsz3fOmiNpsYhDKf/7819lUeYm179ULp+Rks1euvBKsq4F57
+      1rtXoMbwW1bwR7t8jLsis34zb0N8KGjA1Y/AwasCgYBFukWqmjTkwbRfkUiY4kSA
+      B0lU/NJr8pz7UvDKnCAdVPqyeeqC8IQsyrux4Uw3KDYsnErdsi3itQ6YUxQhMr05
+      1kkNLuug6I7no0eb/aC3AooxPOljfA3vyOeTP4ZUSbN1JDyrrAoEkhz1+ihqdOlp
+      8zaJrpWw+8HEIUGGYNgzvQKBgFiOmkg/NTErUBbf1YvcipFitY7w47vyyHm1vqQ7
+      i3xOMb5O7xYXlhvzeB2StyDXEAw6IRyr8bHzSbKeAeR5DgrDMK/mi98SZOCCwkbE
+      dC6MilpHa3aAT7NZL1SMJOoEPKfgEhrxXL8XeH2XjgXcSTq2blVlnngB8TXtjXB+
+      LecbAoGBAOtth85NjYh/SpgrBnSQLuD6WPIlab4E1MV8Ol/pi8+QdZVZsuirEh23
+      N/ykr7/zlHC4/C2jgNRAaDuDwjntrRXGTKOaP/owky719peiyzZdrxPsgAhS5QFz
+      tp4Klb2lGLbcKrUCDhrZzV5irnshRJvRQ3QihPOwb4H28Wu3lLq1
+      -----END RSA PRIVATE KEY-----
+    upstream_static_s3: theloopyewe-dev-belasco-legacy-static-us-west-2.s3-us-west-2.amazonaws.com
+  legacy:
+    debug: true
+    environment: dev
+    file:
+      parametersyml: "parameters:\n    database_driver: \"pdo_mysql\"\n    database_host:
+        \"127.0.0.1\"\n    database_port: ~\n    database_name: \"app_legacy\"\n    database_user:
+        \"def_app\"\n    database_password: \"def_app\"\n\n    mailer_transport: \"smtp\"\n
+        \   mailer_host: \"smtp.mailgun.org\"\n    mailer_user: \"app-legacy@abytepool.com\"\n
+        \   mailer_password: \"nfy1kHjkS^0N&^!4\"\n\n    locale: \"en\"\n    secret:
+        \"6732b43f6ac04a97db9e43ef0f47aa9e\"\n    \n    airbrake.api_key: \"1db1af9296299b39c5fccad7f4e7394d\"\n\n
+        \   aws.s3.media.accesskey: \"AKIAJAF5IRSW5MV2H6LA\"\n    aws.s3.media.secret:
+        \"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\"\n    aws.s3.media.bucket: \"theloopyewe-dev-belasco-legacy-assets-us-west-2\"\n
+        \   aws.s3.media.archive_bucket: \"theloopyewe-dev-belasco-legacy-archives-us-west-2\"\n
+        \   aws.s3.media.static_bucket: \"theloopyewe-dev-belasco-legacy-static-us-west-2\"\n\n
+        \   aws.sqs.worker.accesskey: \"AKIAJAF5IRSW5MV2H6LA\"\n    aws.sqs.worker.secret:
+        \"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\"\n    aws.sqs.worker.region: \"us-west-2\"\n\n
+        \   tle.tax.taxco.username: \"website@theloopyewe.com\"\n    tle.tax.taxco.password:
+        \"laths95?PCBs\"\n\n    tle.web.shortlink.url: \"http://abytepool.com:9876\"\n
+        \   tle.web.shortlink.username: \"myuser\"\n    tle.web.shortlink.password:
+        \"mypass\"\n    \n    http.hostname: \"legacy-develop.abytepool.com\"\n    email.hostname:
+        \"%http.hostname%\"\n\n    tle.paypal.authentication.username: \"paypal-business1_api1.abytepool.com\"\n
+        \   tle.paypal.authentication.password: \"1384469358\"\n    tle.paypal.authentication.signature:
+        \"AfHnBiwOLPukXh1fkVGx6k58ubv5AgunI4yLjHLfmQrFcrvbk1.K51rt\"\n\n    tle.google.merchant.account_id:
+        \"7949186\"\n    tle.google.api.default.email: \"610537012347-cpacc2ht37edb45ea4ie1b9pva82nfct@developer.gserviceaccount.com\"\n
+        \   tle.google.api.default.key_file: \"/var/vcap/jobs/webapp/etc/google-api-default.p12\"\n
+        \   tle.google.api.default.key_passphrase: \"notasecret\"\n    tle.google.api.default.possess:
+        \"dannyb@theloopyewe.com\"\n\n    tle.google.oauth_client_id: \"853822486855.apps.googleusercontent.com\"\n
+        \   tle.google.oauth_client_secret: \"RHn2CeAYFtxS9WvRpUBlsXko\"\n    \n    tle.communicator.automator_lists.username:
+        \"lists@abytepool.com\"\n    tle.communicator.automator_lists.password: \"gonegonegone\"\n\n
+        \   tle.ravelry.client.client_id: F97636AFE33822AFCC01\n    tle.ravelry.client.client_secret:
+        \"2wovv8X4M+1uBd62ooy4smft92EYFjIWB/FXsh3n\"\n"
+    version_branch: develop
+  mysql:
+    serverid: 1732
+  scheduler:
+    config_path: /var/vcap/packages/legacy/root/app/crond
+  spot_termination_notice:
+    scripts:
+    - echo truthy-shutdown > /var/vcap/store/termination-test
+    - /var/vcap/packages/consul/bin/consul maint -enable -reason 'Scheduled spot termination'
+  webapp:
+    elasticsearch_host: 127.0.0.1
+releases:
+- name: tle-legacy
+  version: latest
+- name: logsearch
+  version: latest
+- name: consul
+  version: latest
+- name: aws-utils
+  version: latest
+- name: consul-bosh-links
+  version: latest
+resource_pools:
+- cloud_properties:
+    availability_zone: us-west-2b
+    ephemeral_disk:
+      size: 16384
+    instance_type: c4.large
+    spot_bid_price: 0.06
+  name: z0_default
+  network: z0_default
+  size: 1
+  stemcell:
+    name: bosh-aws-xen-hvm-ubuntu-trusty-go_agent
+    version: 3104
+update:
+  canaries: 1
+  canary_watch_time: 30000-180000
+  max_errors: 2
+  max_in_flight: 1
+  serial: false
+  update_watch_time: 30000-180000
